@@ -86,6 +86,9 @@ if (!empty($_ENV['MRBS_URL_BASE']))
 $mrbs_company = "Sportunion Michelhausen";
 $vocab_override['de']['mrbs'] = "Sportstättenreservierung";
 
+// Require users to sign in before viewing bookings.
+$auth['deny_public_access'] = true;
+
 // MRBS stores booking type codes in a single-character database column.
 $booking_types = ['U', 'S', 'G'];
 $default_type = 'U';
