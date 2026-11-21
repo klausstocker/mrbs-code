@@ -37,13 +37,13 @@ if ($multisite && isset($site) && ($site !== ''))
 // file can't use jQuery.
 echo script_html('js/init.js.php', true);
 
-echo script_html(($debug) ? 'jquery/jquery-3.7.1.js' : 'jquery/jquery-3.7.1.min.js');
+echo script_html(($debug) ? 'jquery/jquery-4.0.0.js' : 'jquery/jquery-4.0.0.min.js');
 
-// We need the migration script now that we are running jQuery 3.0+, or at least
+// We need the migration script now that we are running jQuery 4.0+, or at least
 // until we are confident that our JavaScript is not using any features that have
 // been removed.   The uncompressed version will output warnings about removed and
 // deprecated features to the console
-echo script_html(($debug) ? 'jquery/jquery-migrate-3.5.0.js' : 'jquery/jquery-migrate-3.5.0.min.js');
+echo script_html(($debug) ? 'jquery/jquery-migrate-4.0.2.js' : 'jquery/jquery-migrate-4.0.2.min.js');
 
 // We are using the jQuery UI library, which has been custom-built to include the following components:
 //   - Core
@@ -93,16 +93,27 @@ if (null !== ($select2_lang_path = Language::getInstance()->getSelect2LangPath()
 }
 
 // dataTables initialisation
-if (in_array($page, array('admin', 'edit_users', 'pending', 'report', 'search', 'view_entry')))
+if (in_array($page, ['admin', 'edit_users', 'pending', 'report', 'search', 'view_entry']))
 {
   // Include the JavaScript for those pages that use dataTables
   // When constructing the DataTables download we want to include the following:
   //    DataTables styling framework
   //    DataTables package
-  //    Buttons, and all sub-options
-  //    ColReorder
-  //    FixedColumns
-  echo script_html(($debug) ? 'jquery/datatables/datatables.js' : 'jquery/datatables/datatables.min.js', true);
+  //    EXTENSIONS
+  //      Buttons, and all sub-options
+  //      ColReorder
+  //      FixedColumns
+  //    EXTERNAL LIBRARIES
+  //      JSZip
+  //      pdfmake
+
+  // NOTE: We have manually applied https://github.com/DataTables/Buttons/commit/b054cb5f7b6d0c51a6b5e45e2c6bdb5a2fe8c07a
+  // which fixes a security vulnerability in the Buttons extension that potentially allows formula injection using
+  // strings starting with '-' ot '+'.  This will appear in the next release of Buttons, ie the one after 4.1.3.  Until
+  // it does, we only offer the unminified version of DataTables, and if a new combined download is built beforehand
+  // then the patch should be reapplied.
+  // echo script_html(($debug) ? 'jquery/datatables/datatables.js' : 'jquery/datatables/datatables.min.js', true);
+  echo script_html('jquery/datatables/datatables.js', true);
   echo script_html('jquery/datatables/plugins.js', true);
   echo script_html("js/datatables.js.php?$query_string", true);
 }

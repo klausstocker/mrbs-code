@@ -10,6 +10,7 @@ use function MRBS\db;
 use function MRBS\db_schema_version;
 use function MRBS\get_cookie_path;
 use function MRBS\is_https;
+use function MRBS\location_header;
 
 abstract class Session
 {
@@ -45,12 +46,20 @@ abstract class Session
   /**
    * Get the session handler to use.
    *
-   * If the database session handler is not available, use the ordinary PHP session handler.
+   * If the database session handler is not available, or if the config variable
+   * `$auth['session_php']['use_internal_php_handler']` is truthy, use the ordinary PHP session handler.
    *
    * @return SessionHandlerDb|SessionHandler
    */
   protected function getSessionHandler()
   {
+    global $auth;
+
+    if (!empty($auth['session_php']['use_internal_php_handler']))
+    {
+      return new SessionHandler();
+    }
+
     // The sessions table was only created in Upgrade 56. We test for the schema version rather than the existence of
     // the table, because the table is renamed in later upgrades.
     if (db_schema_version(db()) < 56)
@@ -224,6 +233,20 @@ abstract class Session
 
     // Use an empty string for anonymous bookings
     return new User('');
+  }
+
+
+  /**
+   * Log off the current user and optionally redirect to a different page.
+   *
+   * @return void|never
+   */
+  public function logoffUser(?string $redirect_url=null) : void
+  {
+    if (isset($redirect_url))
+    {
+      location_header($redirect_url);
+    }
   }
 
 

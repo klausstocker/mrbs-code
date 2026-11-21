@@ -66,7 +66,7 @@ function generate_search_nav_html(int $search_pos, int $total, int $num_records,
 
 function output_row($row, $returl)
 {
-  global $is_ajax, $json_data, $view;
+  global $is_ajax, $json_data, $view, $timezone;
 
   $vars = array('id'     => $row['id'],
                 'returl' => $returl);
@@ -81,7 +81,7 @@ function output_row($row, $returl)
   // created by
   $values[] = escape_html(get_compound_name($row['create_by']));
   // start time and link to day view
-  $start_date = new DateTime('now', new DateTimeZone($row['timezone']));
+  $start_date = new DateTime('now', new DateTimeZone($row['timezone'] ?? $timezone));
   $start_date->setTimestamp($row['start_time']);
 
   $vars = [
@@ -377,7 +377,7 @@ if (!$ajax_capable || $is_ajax || $ics)
   $num_records = $result->count();
 }
 
-if (!($ajax_capable || $ics))
+if (!($ajax_capable || $is_ajax || $ics))
 {
   echo generate_search_nav_html($search_pos, $total, $num_records, $search_str);
 }

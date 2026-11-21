@@ -5,13 +5,13 @@ namespace MRBS;
 use DateInterval;
 use DateTimeZone;
 use Email\Parse;
+use IntlDatePatternGenerator;
 use InvalidArgumentException;
 use MRBS\Form\Field;
 use MRBS\Form\FieldSelect;
 use MRBS\ICalendar\RFC5545;
 use IntlDateFormatter;
 use MRBS\Intl\IntlDateFormatterFactory;
-use MRBS\Intl\IntlDatePatternGenerator;
 use PHPMailer\PHPMailer\PHPMailer;
 use TypeError;
 
@@ -25,7 +25,7 @@ require_once "mrbs_sql.inc";
  */
 function get_vocab(string $tag, ...$values) : string
 {
-  return Language::getInstance()->getVocab($tag, Language::getInstance()->getWebLang(), ...$values);
+  return Language::getInstance()->getVocab($tag, Language::getInstance()->getWebLang(), false, ...$values);
 }
 
 
@@ -35,7 +35,7 @@ function get_vocab(string $tag, ...$values) : string
  */
 function get_mail_vocab(string $tag, ...$values) : string
 {
-  return Language::getInstance()->getVocab($tag, Language::getInstance()->getMailLang(), ...$values);
+  return Language::getInstance()->getVocab($tag, Language::getInstance()->getMailLang(), false, ...$values);
 }
 
 
@@ -132,7 +132,7 @@ function constrain_int(int $n, int $bytes, bool $unsigned=false) : int
     throw new InvalidArgumentException("Other combinations not yet supported");
   }
 
-  return max(min($n, $max_limit), $min_limit);
+  return clamp($n, $min_limit, $max_limit);
 }
 
 
@@ -507,6 +507,9 @@ function get_cookie_path()
   {
     // REQUEST_URI isn't set on all PHP systems, so fall back to PHP_SELF
     $cookie_path = $server['REQUEST_URI'] ?? $server['PHP_SELF'];
+    // Remove any query string and fragment first. They can contain slashes which
+    // would otherwise be mistaken for the end of the path.
+    $cookie_path = preg_replace('/[?#].*$/s', '', $cookie_path); 
     // Strip off everything after the last '/'
     $cookie_path = preg_replace('/[^\/]*$/', '', $cookie_path);
     // Some cases have been observed of the cookie path being set to, for example,
@@ -558,62 +561,6 @@ function url_path() : string
 
 
 /**
- * Returns the base URL for MRBS.  If the config variable $url_base is set, then that
- * overrides the automatic calculation.  A '/' will be appended to the end of the string,
- * unless it is empty or already ends in a '/'.
- */
-function url_base() : string
-{
-  global $url_base, $server;
-
-  // Use the $url_base if there is one and it is well-formed.
-  if (isset($url_base))
-  {
-    $parsed_url = parse_url($url_base);
-    if ($parsed_url === false)
-    {
-      trigger_error('Cannot parse $url_base of "' . $url_base . '"', E_USER_WARNING);
-    }
-  }
-
-  // Otherwise construct it from the $_SERVER variables if we can.
-  if (empty($parsed_url) && isset($server['HTTP_HOST']))
-  {
-    $parsed_url = [
-      'host' => $server['HTTP_HOST'],
-      'path' => dirname(url_path())
-    ];
-  }
-
-  // If we haven't got any URL parts, then return an empty string.
-  if (empty($parsed_url))
-  {
-    $result = '';
-  }
-  // Otherwise tidy up the URL parts and rebuild it.
-  else
-  {
-    // Add a scheme if we haven't got one
-    if (!isset($parsed_url['scheme']))
-    {
-      $parsed_url['scheme'] = is_https() ? 'https' : 'http';
-    }
-    // Remove any query and fragment (which shouldn't be there anyway, but just in case)
-    unset($parsed_url['query'], $parsed_url['fragment']);
-    // Rebuild the URL
-    $result = build_url($parsed_url);
-    // Add a trailing '/' if there isn't one already.
-    if (!str_ends_with($result, '/'))
-    {
-      $result .= '/';
-    }
-  }
-
-  return $result;
-}
-
-
-/**
  * Check that the URL is only a local URL.  This is used to prevent open redirects.
  *
  * @return string|null  The URL if it is a local URL, otherwise null.
@@ -640,6 +587,48 @@ function url_validate_local(string $url) : ?string
     if (isset($parsed_url[$component]) && ($parsed_url[$component] !== '') && ($parsed_url[$component] !== $parsed_base[$component]))
     {
       return null;
+    }
+  }
+
+  return $url;
+}
+
+
+
+/**
+ * Validate that a given URL is *not* a local URL.  Useful for preventing Server Side Request Forgery attacks.
+ *
+ * @return string|null The URL if it is a remote URL, otherwise null.
+ */
+function url_validate_remote(string $url): ?string
+{
+  // Check the URL is valid
+  if (false === ($url = filter_var($url, FILTER_VALIDATE_URL))) {
+    return null;
+  }
+  // Check that we can parse the URL
+  if (false === ($url_components = parse_url($url))) {
+    return null;
+  }
+  // Disallow some schemes for security reasons (possible SSRF attack)
+  if (isset($url_components['scheme']) && in_arrayi($url_components['scheme'], ['file'])) {
+    return null;
+  }
+  // Check the hostname is well-formed
+  if (false === ($hostname = filter_var($url_components['host'], FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME))) {
+    return null;
+  }
+  // Check the hostname is not 'localhost' (possible SSRF attack)
+  if (mb_strtolower($hostname) == 'localhost') {
+    return null;
+  }
+  // If the hostname is an IP address, check that it is not a local one (possible SSRF attack)
+  if (ip2long($hostname) !== false) {
+    foreach (['127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16'] as $cidr) {
+      // This won't work with IPv6 addresses, but IPv6 addresses will have been disallowed by the filter_var() call above
+      if (!ip_cidr_check($hostname, $cidr)) {
+        return null;
+      }
     }
   }
 
@@ -741,13 +730,16 @@ function build_url(array $parts) : string
 
 
 /**
- * A wrapper for sending a Location header.  This function will urlencode and add
- * the site parameter as necessary.
+ * A wrapper for sending a Location header.  This function will URL encode the query string parameter values
+ * and add the site parameter as necessary.
  *
- * @param string $location  The URL to redirect to.  This must be a local URL.
+ * @param string $location  The URL to redirect to.  This must be a local URL and the query string parameter
+ * values are assumed to have already been URL encoded.
+ * @param array $data  An array of additional query string parameters to add to the URL.  The
+ * values are assumed *not* to be URL encoded.  This is useful for passing values such as "%3F".
  * @return never
  */
-function location_header(string $location) : void
+function location_header(string $location, array $data=[]) : void
 {
   global $debug;
 
@@ -768,13 +760,25 @@ function location_header(string $location) : void
   // Add the site parameter if necessary
   $location = multisite($location);
 
-  // Encode the query string if there is one
+  // Get the query string if there is one
   $parts = parse_url($location);
 
+  $query_string_parts = [];
+  // First from the query string in the URL
   if (isset($parts['query']))
   {
-    parse_str($parts['query'], $result);
-    $parts['query'] = http_build_query($result, '', '&');
+    parse_str($parts['query'], $query_string_parts);
+  }
+  // Then add in any additional query string parameters from $data
+  if (!empty($data))
+  {
+    $query_string_parts = array_merge($query_string_parts, $data);
+  }
+
+  // Rebuild the query string
+  if (!empty($query_string_parts))
+  {
+    $parts['query'] = http_build_query($query_string_parts, '', '&');
   }
 
   header('Location: ' . build_url($parts));
@@ -987,38 +991,37 @@ function print_footer(bool $and_exit=false) : void
 }
 
 
-// Converts a duration of $dur seconds into a duration of
-// $dur $units
-// $max_unit can be set to 'seconds', 'minutes', 'hours', etc. and
-// is used to specify a maximum size of unit to use.  For example if
-// it is set to 'minutes', 3600 seconds will give 60 minutes rather
-// than 1 hour.
-function toTimeString(int &$dur, &$units, bool $translate=true, ?string $max_unit=null)
+/**
+ * Convert a duration of seconds into the largest unit of time that has a value greater than or equal to 1.
+ * For example, 3600 seconds will give 1 hour, 86400 seconds will give 1 day, etc.
+ *
+ * @param int $seconds
+ * @param 'seconds'|'minutes'|'hours'|'days'|'weeks'|'years' $max_unit
+ * @return array{value: int, units: 'seconds'|'minutes'|'hours'|'days'|'weeks'|'years'}
+ */
+function to_time_string_canonical(int $seconds, string $max_unit='years') : array
 {
-  if (!isset($max_unit))
-  {
-    $max_unit = 'years';
-  }
+  $value = $seconds;
 
-  if (($max_unit != 'seconds') && (abs($dur) >= 60) && ($dur % 60 == 0))
+  if (($max_unit != 'seconds') && (abs($value) >= 60) && ($value % 60 == 0))
   {
-    $dur /= 60;
+    $value /= 60;
 
-    if (($max_unit != 'minutes') && (abs($dur) >= 60) && ($dur % 60 == 0))
+    if (($max_unit != 'minutes') && (abs($value) >= 60) && ($value % 60 == 0))
     {
-      $dur /= 60;
+      $value /= 60;
 
-      if(($max_unit != 'hours') && ((abs($dur) >= 24) && ($dur % 24 == 0)))
+      if(($max_unit != 'hours') && ((abs($value) >= 24) && ($value % 24 == 0)))
       {
-        $dur /= 24;
+        $value /= 24;
 
-        if(($max_unit != 'days') && ((abs($dur) >= DAYS_PER_WEEK) && ($dur % DAYS_PER_WEEK == 0)))
+        if(($max_unit != 'days') && ((abs($value) >= DAYS_PER_WEEK) && ($value % DAYS_PER_WEEK == 0)))
         {
-          $dur /= DAYS_PER_WEEK;
+          $value /= DAYS_PER_WEEK;
 
-          if (($max_unit != 'weeks') && ((abs($dur) >= 52) && ($dur % 52 == 0)))
+          if (($max_unit != 'weeks') && ((abs($value) >= 52) && ($value % 52 == 0)))
           {
-            $dur  /= 52;
+            $value  /= 52;
             $units = 'years';
           }
           else
@@ -1046,11 +1049,36 @@ function toTimeString(int &$dur, &$units, bool $translate=true, ?string $max_uni
     $units = 'seconds';
   }
 
+  return ['value' => $value, 'units' => $units];
+}
+
+
+// Converts a duration of $dur seconds into a duration of
+// $dur $units
+// $max_unit can be set to 'seconds', 'minutes', 'hours', etc. and
+// is used to specify a maximum size of unit to use.  For example if
+// it is set to 'minutes', 3600 seconds will give 60 minutes rather
+// than 1 hour.
+function toTimeString(int &$dur, &$units, bool $translate=true, ?string $max_unit=null)
+{
+  if (!isset($max_unit))
+  {
+    $max_unit = 'years';
+  }
+
+  list('value' => $dur, 'units' => $units) = to_time_string_canonical($dur, $max_unit);
+
   // Limit any floating point values to three decimal places
   if (is_float($dur))
   {
     $dur = sprintf('%.3f', $dur);
     $dur = rtrim($dur, '0');  // removes trailing zeros
+  }
+  // Convert any single integer values from the plural to the singular
+  elseif ($dur === 1)
+  {
+    // TODO: This isn't very elegant. Eventually we should use something like the intl MessageFormatter class.
+    $units = rtrim($units, 's');
   }
 
   // Translate into local language if required
@@ -1415,49 +1443,83 @@ function fit_to_booking_day(int $t, bool $back=true) : int
 
 
 /**
- * Get the duration of an interval given a start time and end time.
+ * Get the duration, expressed as a localised string, of an interval given a start time and end time.
  *
  * Corrects for DST changes so that the duration is what the user would expect to see.
  * For example, 12 noon to 12 noon crossing a DST boundary is 24 hours.
  *
  * @param int $start_time Unix timestamp
  * @param int $end_time Unix timestamp
- * @param bool $enable_periods Whether periods are being used
- * @param bool $translate Whether to translate into the browser language
- * @return array{duration: int, dur_units: string}
+ * @param int $area_id The area id of the booking.
+ * @param string|null $lang The language to use for the result. If NULL, the current setting for browser output is used.
+ * @return string
+ * @throws \Exception
  */
-function get_duration(int $start_time, int $end_time, bool $enable_periods, int $area_id, bool $translate=true) : array
+function get_duration_string(int $start_time, int $end_time, int $area_id, ?string $lang=null) : string
 {
-  $result = array();
+  static $area_details = [];
 
-  $period_names = get_period_names();
-
-  if ($enable_periods)
+  if (!isset($area_details[$area_id]))
   {
-    $periods_per_day = count($period_names[$area_id]);
-    $n_periods = get_period_interval($start_time, $end_time, $area_id);  // this handles DST
-    if (($n_periods % $periods_per_day) == 0)
+    if (null === ($area_details[$area_id] = get_area_details($area_id)))
     {
-      $result['duration'] =  intval($n_periods/$periods_per_day);
-      $result['dur_units'] = ($translate) ? get_vocab('days') : 'days';
+      throw new \Exception("Invalid area ID '$area_id'");
+    }
+  }
+
+  $lang = $lang ?? Language::getInstance()->getWebLang();
+
+  if ($area_details[$area_id]['enable_periods'])
+  {
+    $periods_per_day = count(json_decode($area_details[$area_id]['periods'], true));
+    $total_periods = get_period_interval($start_time, $end_time, $area_id);  // this handles DST
+    $n_days = intval($total_periods/$periods_per_day);
+    $n_periods = $total_periods % $periods_per_day;
+    $day_string = ($n_days > 0) ? Language::getInstance()->getVocab('duration_days', $lang, false, $n_days) : null;
+    $period_string = ($n_periods > 0) ? Language::getInstance()->getVocab('duration_periods', $lang, false, $n_periods) : null;
+    if (isset($day_string) && isset($period_string))
+    {
+      return Language::getInstance()->getVocab('days_and_subunits', $lang, false, $day_string, $period_string);
     }
     else
     {
-      $result['duration'] = $n_periods;
-      $result['dur_units'] = ($translate) ? get_vocab('periods') : 'periods';
+      return (isset($day_string)) ? $day_string : $period_string;
     }
   }
-  else
-  {
-    $result['duration'] = $end_time - $start_time;
-    // Need to make DST correct in opposite direction to entry creation
-    // so that user see what he expects to see
-    $result['duration'] -= cross_dst($start_time, $end_time);
-    toTimeString($result['duration'], $result['dur_units'], $translate);
-  }
-  return $result;
+
+  return get_duration_string_times($start_time, $end_time, $lang, $area_details[$area_id]['timezone']);
 }
 
+
+/**
+ * Get a time duration as a string, for example "2 hours" or "1 jour".
+ *
+ * @param int $start_time A Unix timestamp
+ * @param int $end_time A Unix timestamp
+ * @param string|null $lang The language to use for the result. If NULL, the current setting for browser output is used.
+ * @param string|null $tzid The timezone that the start and end times are in. If NULL, the timezone for the current area
+ * is used.
+ * @param null|'seconds'|'minutes'|'hours'|'days'|'weeks'|'years' $max_unit The maximum unit of time to use for the duration. For
+ * example, if the duration is 24 hours and `$max_unit` is set to 'hours' the result will be 24 hours rather than 1 day.
+ * @return string
+ */
+function get_duration_string_times(int $start_time, int $end_time, ?string $lang=null, ?string $tzid=null, string $max_unit='weeks') : string
+{
+  // TODO: 'years' are not proper years; they are periods of 52 weeks.  Remove them?
+  global $timezone;
+
+  $lang = $lang ?? Language::getInstance()->getWebLang();
+  $tzid = $tzid ?? $timezone;
+
+  $duration = $end_time - $start_time;
+  // Correct the duration if it crosses a DST boundary so that it is expressed as a nominal duration.
+  // For example, 12 noon to 12 noon crossing a DST boundary is 24 hours.
+  $duration -= cross_dst($start_time, $end_time, $tzid);
+
+  list('value' => $value, 'units' => $units) = to_time_string_canonical($duration, $max_unit);
+
+  return Language::getInstance()->getVocab("duration_$units", $lang, false, $value);
+}
 
 // Escape a PHP variable for use in HTML
 function escape_html($value)
@@ -1600,7 +1662,7 @@ function get_default_room(int $area) : int
 
     if (($room >= 0) && is_visible($room))
     {
-      return (int) $room;
+      return $room;
     }
   }
 
@@ -1632,15 +1694,17 @@ function get_area(int $room) : int
 /**
  * Get the timezone for an area
  *
- * @return false|string The timezone string, or false if there isn't one.
+ * @return false|string The timezone string, or the default timezone if there isn't one.
  */
 function get_area_timezone(int $area_id)
 {
+  global $timezone;
+
   $sql = "SELECT timezone
             FROM " . _tbl('area') . "
            WHERE id=:id
            LIMIT 1";
-  return db()->query_scalar_non_bool($sql, [':id' => $area_id]);
+  return db()->query_scalar_non_bool($sql, [':id' => $area_id]) ?? $timezone;
 }
 
 
@@ -2232,34 +2296,39 @@ function validate_email_list(string $list) : bool
 function parse_email(string $email)
 {
   $parser = new Parse(new Logger());
-  $parsed_address = $parser->parse($email, false);
+  $parsed_address = $parser->parseSingle($email);
 
-  if ($parsed_address['invalid'])
+  if ($parsed_address->invalid)
   {
     return false;
   }
 
   return [
-    'local' => $parsed_address['local_part_parsed'],
-    'domain' => $parsed_address['domain_part']
+    'local' => $parsed_address->localPartParsed,
+    'domain' => $parsed_address->domainPart
   ];
 }
 
 
+/**
+ * Parse a string of email addresses
+ *
+ * @return array{array{name: string, address: string}} An array of arrays keyed by 'name' and 'address'
+ */
 function parse_addresses(string $address_string) : array
 {
   $result = [];
 
   $parser = new Parse(new Logger());
-  $parsed_addresses = $parser->parse($address_string);
+  $parsed_addresses = $parser->parseMultiple($address_string);
 
-  foreach ($parsed_addresses['email_addresses'] as $parsed_address)
+  foreach ($parsed_addresses->emailAddresses as $parsed_address)
   {
-    if (!$parsed_address['invalid'])
+    if (!$parsed_address->invalid)
     {
       $result[] = [
-        'name' => $parsed_address['name_parsed'],
-        'address' => $parsed_address['local_part_parsed'] . '@' . $parsed_address['domain_part']
+        'name' => $parsed_address->nameParsed,
+        'address' => $parsed_address->localPartParsed . '@' . $parsed_address->domainPart
       ];
     }
   }
@@ -2514,16 +2583,23 @@ function is_invalid_datetime(int $hour, int $minute, int $second, int $month, in
  *
  * @param int $start A Unix timestamp
  * @param int $end A Unix timestamp
+ * @param string|null $tzid The timezone to use (defaults to the current timezone)
  * @return int The modification in seconds.
+ * @throws \DateInvalidTimeZoneException
  */
-function cross_dst(int $start, int $end) : int
+function cross_dst(int $start, int $end, ?string $tzid=null) : int
 {
   global $timezone;
+
+  if (!isset($tzid))
+  {
+    $tzid = $timezone;
+  }
 
   // Calculate the modification using the DateTimeZone information rather than date('I', $time),
   // because not all DST transitions are 1 hour.  For example, Lord Howe Island in Australia
   // has a 30-minute transition.
-  $thisDateTimeZone = new DateTimeZone($timezone);
+  $thisDateTimeZone = new DateTimeZone($tzid);
   $startDateTime = (new DateTime('now', $thisDateTimeZone))->setTimestamp($start);
   $endDateTime = (new DateTime('now', $thisDateTimeZone))->setTimestamp($end);
   return $startDateTime->getOffset() - $endDateTime->getOffset();
@@ -2780,7 +2856,7 @@ function is_get_request() : bool
 {
   global $server;
 
-  return ($server['REQUEST_METHOD'] === 'GET');
+  return (isset($server['REQUEST_METHOD']) && $server['REQUEST_METHOD'] === 'GET');
 }
 
 
@@ -3037,45 +3113,4 @@ function ip_cidr_check (string $ip, string $cidr) : bool
   $ip_mask = ~((1 << (32 - $mask)) - 1);
 
   return (($ip_ip & $ip_mask) == ($ip_net & $ip_mask));
-}
-
-
-/**
- * Validate that a given URL is *not* a local URL.  Useful for preventing Server Side Request Forgery attacks.
- *
- * @return false|string FALSE if the URL is local, otherwise the URL
- */
-function url_validate_not_local(string $url)
-{
-  // Check the URL is valid
-  if (false === ($url = filter_var($url, FILTER_VALIDATE_URL))) {
-    return false;
-  }
-  // Check that we can parse the URL
-  if (false === ($url_components = parse_url($url))) {
-    return false;
-  }
-  // Disallow some schemes for security reasons (possible SSRF attack)
-  if (isset($url_components['scheme']) && in_arrayi($url_components['scheme'], ['file'])) {
-    return false;
-  }
-  // Check the hostname is well-formed
-  if (false === ($hostname = filter_var($url_components['host'], FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME))) {
-    return false;
-  }
-  // Check the hostname is not 'localhost' (possible SSRF attack)
-  if (mb_strtolower($hostname) == 'localhost') {
-    return false;
-  }
-  // If the hostname is an IP address, check that it is not a local one (possible SSRF attack)
-  if (ip2long($hostname) !== false) {
-    foreach (['127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16'] as $cidr) {
-      // This won't work with IPv6 addresses, but IPv6 addresses will have been disallowed by the filter_var() call above
-      if (!ip_cidr_check($hostname, $cidr)) {
-        return false;
-      }
-    }
-  }
-
-  return $url;
 }

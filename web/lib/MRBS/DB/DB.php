@@ -20,6 +20,8 @@ abstract class DB
   const DB_DBO_DRIVER = null;
   const DB_CHARSET = 'UTF8';
 
+  public $dsn;  // As of PHP 8.1.0 this can be made readonly
+
   protected $dbh = null;
   protected $mutex_locks = array();
   protected $version_string = null;
@@ -27,7 +29,7 @@ abstract class DB
 
   // The SensitiveParameter attribute needs to be on a separate line for PHP 7.
   // The attribute is only recognised by PHP 8.2 and later.
-  abstract public function __construct(
+  public function __construct(
     string $db_host,
     #[\SensitiveParameter]
     string $db_username,
@@ -38,7 +40,11 @@ abstract class DB
     bool   $persist = false,
     ?int   $db_port = null,
     array  $db_options = []
-  );
+  )
+  {
+    assert(version_compare(MRBS_MIN_PHP_VERSION, '8.1.0', '<'), "The dsn property can be made readonly.");
+    $this->dsn = static::dsn($db_host, $db_name, $db_port);
+  }
 
 
   /**
@@ -62,11 +68,13 @@ abstract class DB
   }
 
 
-  // Build a DSN.
-  // The SensitiveParameter attribute needs to be on a separate line for PHP 7.
-  // The attribute is only recognised by PHP 8.2 and later.
+  /**
+   * Build a DSN
+   */
   public static function dsn(
     string $db_host,
+    // The SensitiveParameter attribute needs to be on a separate line for PHP 7.
+    // The attribute is only recognised by PHP 8.2 and later.
     #[\SensitiveParameter]
     string $db_name,
     ?int   $db_port = null
@@ -99,12 +107,15 @@ abstract class DB
   }
 
 
-  // The SensitiveParameter attribute needs to be on a separate line for PHP 7.
-  // The attribute is only recognised by PHP 8.2 and later.
-  // $driver_options is an optional array of options that supplements/overrides the
-  // default options.
+  /**
+   * Connect to the database
+   *
+   * @param array|null $driver_options An optional array of options that supplements/overrides the default options.
+   */
   protected function connect(
     string $db_host,
+    // The SensitiveParameter attribute needs to be on a separate line for PHP 7.
+    // The attribute is only recognised by PHP 8.2 and later.
     #[\SensitiveParameter]
     string $db_username,
     #[\SensitiveParameter]
@@ -125,7 +136,7 @@ abstract class DB
     $options = (empty($driver_options)) ? $default_options : $driver_options + $default_options;
 
     $this->dbh = new PDO(
-      static::dsn($db_host, $db_name, $db_port),
+      $this->dsn,
       $db_username,
       $db_password,
       $options
@@ -175,12 +186,14 @@ abstract class DB
   }
 
 
-  // Execute an SQL query which should return a single non-negative integer value.
-  // This is a lightweight alternative to query(), good for use with count(*)
-  // and similar queries.
-  // It returns -1 if the query returns no result, or a single NULL value, such as from
-  // a MIN or MAX aggregate function applied over no rows.
-  // Throws a DBException on error.
+  /**
+   * Execute an SQL query which should return a single non-negative integer value. This is a lightweight
+   * alternative to query(), useful for COUNT(*) and similar queries.
+   *
+   * @return int The value returned by the query, or -1 if there is no result or a single NULL value,
+   * eg from a MIN or MAX aggregate function applied over no rows.
+   * @throws DBException
+   */
   public function query1(string $sql, array $params = array()) : int
   {
     $result = $this->query_scalar_non_bool($sql, $params);
@@ -191,7 +204,7 @@ abstract class DB
     }
 
     // Check that the result looks like an integer, even though it may be a string, and then cast
-    // it to an integer.  For example "2" is OK, but "2.0" is not.
+    // it to an integer.  For example, "2" is OK, but "2.0" is not.
     $result = filter_var($result, FILTER_VALIDATE_INT);
 
     if ($result === false)
@@ -366,7 +379,9 @@ abstract class DB
   }
 
 
-  // Return a boolean depending on whether $field exists in $table
+  /**
+   * Check whether a field exists in a table.
+   */
   public function field_exists(string $table, string $field): bool
   {
     $rows = $this->field_info($table);
@@ -531,7 +546,7 @@ abstract class DB
   // Returns the syntax for an "upsert" query.  Unfortunately getting the id of the
   // last row differs between MySQL and PostgreSQL.   In PostgreSQL the query will
   // return a row with the id in the 'id' column.  However there isn't a corresponding
-  // way of doing this in MySQL, but db()->insert_id() will work, regardless of whether
+  // way of doing this in MySQL, but $this->insert_id() will work, regardless of whether
   // an insert or update was performed.
   //
   //  $conflict_keys     the key(s) which is/are unique; can be a scalar or an array
@@ -561,7 +576,7 @@ abstract class DB
    *
    * Unfortunately, getting the id of the last row differs between MySQL and PostgreSQL.   In PostgreSQL the query will
    * return a row with the id in the 'id' column.  However, there isn't a corresponding way of doing this in MySQL, but
-   * db()->insert_id() will work, regardless of whether an insert or update was performed.
+   * $this->insert_id() will work, regardless of whether an insert or update was performed.
    *
    * @param array $data An associative array of data to be inserted or updated, indexed by column name.
    * @param string $table The table name where the data should be inserted or updated.
@@ -579,7 +594,7 @@ abstract class DB
     }
 
     list('columns' => $columns, 'values' => $values, 'sql_params' => $params) = $this->prepareData($data, $table, $ignore_columns);
-    $quoted_columns = array_map(array(\MRBS\db(), 'quote'), $columns);
+    $quoted_columns = array_map(array($this, 'quote'), $columns);
     $sql = "INSERT INTO " . $this->quote($table) . "
                         (" . implode(', ', $quoted_columns) . ")
                  VALUES (" . implode(', ', $values) . ") ";
@@ -594,7 +609,7 @@ abstract class DB
       $assignments[] = $this->quote($column) . "=$value";
     }
 
-    $sql .= \MRBS\db()->syntax_on_duplicate_key_update(
+    $sql .= $this->syntax_on_duplicate_key_update(
       $conflict_keys,
       $assignments,
       $has_id_column
@@ -614,7 +629,7 @@ abstract class DB
     $values = array();
     $sql_params = array();
 
-    $cols = (isset($table)) ? Columns::getInstance($table) : array_keys($data);
+    $cols = (isset($table)) ? Columns::getInstance($table, $this) : array_keys($data);
 
     $i = 0;
     foreach ($cols as $col)
