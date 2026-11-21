@@ -2,52 +2,50 @@ name: Docker image
 
 on:
   push:
-    # Publish `main` as Docker `latest` image.
-    branches:
-      - main
-
-    # Publish `v1.2.3` tags as releases.
     tags:
-      - v*
-
-  # Run tests for any PRs.
+      - 'v[0-9]*'
   pull_request:
 
-env:
-  IMAGE_NAME: mrbs
+permissions:
+  contents: read
 
 jobs:
-  # Push image to GitHub Packages.
-  # See also https://docs.docker.com/docker-hub/builds/
-  push:
+  build:
     runs-on: ubuntu-latest
-    permissions:
-      packages: write
-      contents: read
-
     steps:
-      - uses: actions/checkout@v3
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
-      - name: Build image
-        run: docker build . --file Dockerfile --tag $IMAGE_NAME --label "runnumber=${GITHUB_RUN_ID}"
+      - name: Build MRBS image
+        run: docker build --tag mrbs:ci .
 
-      - name: Log in to registry
-        # This is where you will update the personal access token to GITHUB_TOKEN
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u $ --password-stdin
-
-      - name: Push image
+      - name: Publish release to Docker Hub
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        shell: bash
+        env:
+          DOCKERHUB_REPOSITORY: ${{ vars.DOCKERHUB_REPOSITORY }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          IMAGE_ID=ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME
+          if [[ ! "$DOCKERHUB_REPOSITORY" =~ ^[a-z0-9]+([._-]+[a-z0-9]+)*/[a-z0-9]+([._-]+[a-z0-9]+)*$ ]]; then
+            echo "::error::Set DOCKERHUB_REPOSITORY to namespace/repository."
+            exit 1
+          fi
 
-          # Change all uppercase to lowercase
-          IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
-          # Strip git ref prefix from version
-          VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
-          # Strip "v" prefix from tag name
-          [[ "${{ github.ref }}" == "refs/tags/"* ]] && VERSION=$(echo $VERSION | sed -e 's/^v//')
-          # Use Docker `latest` tag convention
-          [ "$VERSION" == "main" ] && VERSION=latest
-          echo IMAGE_ID=$IMAGE_ID
-          echo VERSION=$VERSION
-          docker tag $IMAGE_NAME $IMAGE_ID:$VERSION
-          docker push $IMAGE_ID:$VERSION
+          if [[ -z "$DOCKERHUB_USERNAME" || -z "$DOCKERHUB_TOKEN" ]]; then
+            echo "::error::Set DOCKERHUB_USERNAME and DOCKERHUB_TOKEN in Actions secrets."
+            exit 1
+          fi
+
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "$version" =~ ^[0-9][a-zA-Z0-9_.-]{0,127}$ ]]; then
+            echo "::error::The Git tag does not produce a valid Docker image version."
+            exit 1
+          fi
+
+          image="docker.io/$DOCKERHUB_REPOSITORY:$version"
+          printf '%s\n' "$DOCKERHUB_TOKEN" | docker login docker.io --username "$DOCKERHUB_USERNAME" --password-stdin
+          docker tag mrbs:ci "$image"
+          docker push "$image"

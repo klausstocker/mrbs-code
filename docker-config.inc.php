@@ -81,9 +81,9 @@ $mrbs_company = "Sportunion Michelhausen";
 $vocab_override['de']['mrbs'] = "Sportstättenreservierung";
 
 // MRBS stores booking type codes in a single-character database column.
-$booking_types = ['A', 'B', 'G'];
-$default_type = 'A';
+$booking_types = ['U', 'S', 'G'];
+$default_type = 'U';
 
-$vocab_override['de']['type.A'] = 'SU: Sportunion';
-$vocab_override['de']['type.B'] = 'SV: SV Rust';
+$vocab_override['de']['type.U'] = 'U: Sportunion';
+$vocab_override['de']['type.S'] = 'S: SV Rust';
 $vocab_override['de']['type.G'] = 'G: Gemeinde';
