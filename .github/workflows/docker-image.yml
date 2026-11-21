@@ -2,19 +2,12 @@ name: Docker image
 
 on:
   push:
-    # Publish `main` as Docker `latest` image.
-    branches:
-      - main
-
-    # Publish `v1.2.3` tags as releases.
     tags:
-      - v*
-
-  # Run tests for any PRs.
+      - 'v[0-9]*'
   pull_request:
 
-env:
-  IMAGE_NAME: mrbs
+permissions:
+  contents: read
 
 jobs:
   # Build and smoke-test the image for PRs (safe for forked PRs)
@@ -197,17 +190,23 @@ jobs:
 
       - name: Push image
         run: |
-          IMAGE_ID=ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME
+          if [[ ! "$DOCKERHUB_REPOSITORY" =~ ^[a-z0-9]+([._-]+[a-z0-9]+)*/[a-z0-9]+([._-]+[a-z0-9]+)*$ ]]; then
+            echo "::error::Set DOCKERHUB_REPOSITORY to namespace/repository."
+            exit 1
+          fi
 
-          # Change all uppercase to lowercase
-          IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
-          # Strip git ref prefix from version
-          VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
-          # Strip "v" prefix from tag name
-          [[ "${{ github.ref }}" == "refs/tags/"* ]] && VERSION=$(echo $VERSION | sed -e 's/^v//')
-          # Use Docker `latest` tag convention
-          [ "$VERSION" == "main" ] && VERSION=latest
-          echo IMAGE_ID=$IMAGE_ID
-          echo VERSION=$VERSION
-          docker tag $IMAGE_NAME $IMAGE_ID:$VERSION
-          docker push $IMAGE_ID:$VERSION
+          if [[ -z "$DOCKERHUB_USERNAME" || -z "$DOCKERHUB_TOKEN" ]]; then
+            echo "::error::Set DOCKERHUB_USERNAME and DOCKERHUB_TOKEN in Actions secrets."
+            exit 1
+          fi
+
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "$version" =~ ^[0-9][a-zA-Z0-9_.-]{0,127}$ ]]; then
+            echo "::error::The Git tag does not produce a valid Docker image version."
+            exit 1
+          fi
+
+          image="docker.io/$DOCKERHUB_REPOSITORY:$version"
+          printf '%s\n' "$DOCKERHUB_TOKEN" | docker login docker.io --username "$DOCKERHUB_USERNAME" --password-stdin
+          docker tag mrbs:ci "$image"
+          docker push "$image"
