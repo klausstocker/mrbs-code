@@ -76,3 +76,6 @@ $db_persist = false;
 /* Add lines from systemdefaults.inc.php and areadefaults.inc.php below here
    to change the default configuration. Do _NOT_ modify systemdefaults.inc.php
    or areadefaults.inc.php.  */
+
+$mrbs_company = "Sportunion Michelhausen";
+$vocab_override['de']['mrbs'] = "Sportstättenreservierung";
